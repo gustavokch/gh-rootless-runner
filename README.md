@@ -1,6 +1,6 @@
-# Self-Hosted GitHub Actions Runner Setup
+# Ephemeral self-hosted GitHub Actions runners
 
-This repository contains scripts to automatically build and deploy ephemeral, rootless [GitHub Actions runners](https://docs.github.com/en/actions/hosting-your-own-runners) using Podman.
+This repository contains scripts to automatically build and deploy ephemeral, rootless [GitHub Actions runners](https://docs.github.com/en/actions/hosting-your-own-runners) using Podman.000000
 
 The runners are deployed securely with `tmpfs` mounts, making them effectively read-only and ephemeral, to prevent job state leakage between runs. 
 
