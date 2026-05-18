@@ -1,6 +1,6 @@
 # Ephemeral, root self-hosted GitHub Actions runners using Podman
 
-Deploy ephemeral, rootless GitHub Actions runners using Podman with automated token management and resource allocation. Runners execute in isolated containers with tmpfs mounts for security and state isolation. Includes Python, Node.js, Rust, and standard CI tools. Perfect for organizations wanting secure, stateless self-hosted runners without root privileges.
+Deploy ephemeral, rootless GitHub Actions runners using Podman with automated token management and resource allocation. Runners execute in isolated containers with tmpfs mounts for security and state isolation. Includes Python, Node.js, Rust, and standard CI tools. Perfect if you want secure, stateless self-hosted runners without root privileges.
 
 ## Prerequisites
 
