@@ -139,7 +139,19 @@ deploy_runner() {
 
   ## ── 3. build image (only on first runner) ──────────────
   if (( idx == 1 )); then
-    step "[${idx}/${NUM_RUNNERS}] Building image from Dockerfile"
+    step "[${idx}/${NUM_RUNNERS}] Updating runner version and building image"
+    
+    local latest_version
+    latest_version=$(gh api /repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+    
+    if [[ -n "$latest_version" && "$latest_version" != "null" ]]; then
+      info "Latest runner version: ${latest_version}"
+      sed -i "s|^ARG RUNNER_VERSION=.*|ARG RUNNER_VERSION=${latest_version}|" Containerfile
+      ok "Containerfile updated to v${latest_version}"
+    else
+      warn "Could not fetch latest runner version — using existing version in Containerfile"
+    fi
+
     info "Tag: localhost/gh-runner"
     podman build -t localhost/gh-runner .
     ok   "Image built successfully"
