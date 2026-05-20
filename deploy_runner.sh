@@ -90,35 +90,43 @@ deploy_runner() {
   if (( NUM_RUNNERS == 1 )); then
     local container_name="gh-runner"
     local runner_name="oracle-instance"
-    local env_key="RUNNER_TOKEN"
+    local env_key="RUNNER_JIT_CONFIG"
   else
     local container_name="gh-runner-${idx}"
     local runner_name="oracle-instance-${idx}"
-    local env_key="RUNNER_TOKEN_${idx}"
+    local env_key="RUNNER_JIT_CONFIG_${idx}"
   fi
 
-  ## ── 1. fetch runner registration token ─────────────────
-  step "[${idx}/${NUM_RUNNERS}] Fetching runner registration token from GitHub"
+  ## ── 1. fetch runner JIT configuration ──────────────────
+  step "[${idx}/${NUM_RUNNERS}] Fetching runner JIT configuration from GitHub"
   info "Container: ${container_name}"
   info "Runner:    ${runner_name}"
 
-  local runner_token
-  runner_token=$(gh api --method POST \
-    -H "Accept: application/vnd.github+json" \
-    /repos/${TARGET_REPO}/actions/runners/registration-token \
-    | jq -r '.token')
+  local jit_config
+  jit_config=$(jq -n \
+    --arg name "${runner_name}" \
+    --arg work_folder "_work" \
+    '{name: $name, runner_group_id: 1, labels: ["self-hosted", "linux", "x64"], work_folder: $work_folder}' \
+    | gh api --method POST \
+      -H "Accept: application/vnd.github+json" \
+      /repos/${TARGET_REPO}/actions/runners/generate-jitconfig \
+      --input - \
+    | jq -r '.encoded_jit_config')
 
-  [[ -n "$runner_token" && "$runner_token" != "null" ]] \
-    || die "GitHub API returned no token for runner ${idx} — check 'gh auth status' and repo permissions"
+  [[ -n "$jit_config" && "$jit_config" != "null" ]] \
+    || die "GitHub API returned no JIT config for runner ${idx} — check 'gh auth status' and repo permissions"
 
-  info "Token retrieved (expires in 1 hour)"
+  info "JIT configuration retrieved"
 
-  ## update (or append) token key in .env
+  # Assign to the dynamic key so indirect reference ${!env_key} works later
+  eval "${env_key}=\"${jit_config}\""
+
+  ## update (or append) jit config key in .env
   if grep -q "^${env_key}=" .env; then
-    sed -i "s|^${env_key}=.*|${env_key}=${runner_token}|" .env
+    sed -i "s|^${env_key}=.*|${env_key}=${jit_config}|" .env
     ok "${env_key} updated in .env"
   else
-    printf '\n%s=%s\n' "${env_key}" "${runner_token}" >> .env
+    printf '\n%s=%s\n' "${env_key}" "${jit_config}" >> .env
     ok "${env_key} appended to .env"
   fi
 
@@ -172,6 +180,7 @@ deploy_runner() {
     --restart=always
     --env-file        .env
     -e                RUNNER_NAME="${runner_name}"
+    -e                RUNNER_JIT_CONFIG="${!env_key}"
     --user            runner
     --read-only
     --tmpfs           /tmp:mode=1777

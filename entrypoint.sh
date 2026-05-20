@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${RUNNER_URL:?RUNNER_URL environment variable is required}"
-: "${RUNNER_TOKEN:?RUNNER_TOKEN environment variable is required}"
+: "${RUNNER_JIT_CONFIG:?RUNNER_JIT_CONFIG environment variable is required}"
 RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
 RUNNER_LABELS="${RUNNER_LABELS:-}"
 
@@ -38,22 +37,14 @@ export PATH=/tmp/cargo/bin:$PATH
 
 cleanup() {
     echo "Removing runner registration..."
-    cd /tmp/runner
-    ./config.sh remove --token "${RUNNER_TOKEN}" || true
+    # JIT configuration is consumed upon use and registration is removed automatically
+    # when the ephemeral runner exits.
 }
 trap cleanup EXIT INT TERM
 
 cp -r /home/runner/. /tmp/runner/
 cd /tmp/runner
 
-./config.sh \
-    --unattended \
-    --url "${RUNNER_URL}" \
-    --token "${RUNNER_TOKEN}" \
-    --name "${RUNNER_NAME}" \
-    --labels "${RUNNER_LABELS}" \
-    --replace \
-    --ephemeral
+./config.sh --jitconfig "${RUNNER_JIT_CONFIG}"
 
 exec ./run.sh
-
