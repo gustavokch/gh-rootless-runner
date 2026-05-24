@@ -71,7 +71,7 @@ if (( NUM_RUNNERS > 1 )); then
   TOTAL_RAM_MB=$(awk '/MemTotal/{ printf "%d", $2/1024 }' /proc/meminfo)
 
   RUNNER_CPUS=$(awk "BEGIN { printf \"%.2f\", ${TOTAL_THREADS}/${NUM_RUNNERS} }")
-  RUNNER_RAM_MB=$(( TOTAL_RAM_MB / NUM_RUNNERS ))
+  RUNNER_RAM_MB=$(( (TOTAL_RAM_MB - 2048) / NUM_RUNNERS ))  # Reserve 2GB for host
 
   info "CPU threads : ${TOTAL_THREADS} total  →  ${RUNNER_CPUS} per runner"
   info "RAM         : ${TOTAL_RAM_MB}MB total  →  ${RUNNER_RAM_MB}MB per runner"
