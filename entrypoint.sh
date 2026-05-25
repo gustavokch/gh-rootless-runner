@@ -63,24 +63,48 @@ trap cleanup EXIT INT TERM
 cp -r /home/runner/. /tmp/runner/
 cd /tmp/runner
 
+INITIAL_RETRY_DELAY=10
+MAX_RETRY_DELAY=300
+RETRY_DELAY=$INITIAL_RETRY_DELAY
+
 while true; do
     echo "Fetching runner JIT configuration from GitHub..."
     
-    JIT_CONFIG=$(curl -s -X POST \
+    # Use a temporary file to capture the response body
+    RESPONSE_FILE=$(mktemp)
+    HTTP_STATUS=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer $GH_TOKEN" \
         "https://api.github.com/repos/${TARGET_REPO}/actions/runners/generate-jitconfig" \
-        -d "{\"name\":\"${RUNNER_NAME}\",\"runner_group_id\":1,\"labels\":[\"self-hosted\",\"linux\",\"x64\"],\"work_folder\":\"_work\"}" \
-        | jq -r '.encoded_jit_config')
+        -d "{\"name\":\"${RUNNER_NAME}\",\"runner_group_id\":1,\"labels\":[\"self-hosted\",\"linux\",\"x64\"],\"work_folder\":\"_work\"}")
 
-    if [[ -z "$JIT_CONFIG" || "$JIT_CONFIG" == "null" ]]; then
-        echo "Error: Failed to fetch JIT configuration."
-        sleep 10
+    JIT_CONFIG=$(jq -r '.encoded_jit_config' "$RESPONSE_FILE" 2>/dev/null || echo "null")
+    
+    if [[ "$HTTP_STATUS" -ne 201 ]] || [[ -z "$JIT_CONFIG" || "$JIT_CONFIG" == "null" ]]; then
+        echo "Error: Failed to fetch JIT configuration (HTTP $HTTP_STATUS)."
+        if [[ -s "$RESPONSE_FILE" ]]; then
+            echo "Response: $(cat "$RESPONSE_FILE")"
+        fi
+        rm -f "$RESPONSE_FILE"
+
+        echo "Retrying in ${RETRY_DELAY} seconds..."
+        sleep "$RETRY_DELAY"
+        RETRY_DELAY=$(( RETRY_DELAY * 2 ))
+        if [[ "$RETRY_DELAY" -gt "$MAX_RETRY_DELAY" ]]; then
+            RETRY_DELAY=$MAX_RETRY_DELAY
+        fi
         continue
     fi
+    rm -f "$RESPONSE_FILE"
+    
+    # Reset backoff on success
+    RETRY_DELAY=$INITIAL_RETRY_DELAY
 
     echo "Starting runner..."
     ./run.sh --jitconfig "${JIT_CONFIG}" || echo "Runner exited with error"
+
+    # Mandatory cooldown to prevent rapid restart loops if runner crashes
+    sleep 5
 
     if [[ "$TTL_SECONDS" -gt 0 ]]; then
         CURRENT_TIME=$(date +%s)
