@@ -16,9 +16,10 @@ die()   { err "$1"; exit 1; }
 
 ## ── usage ────────────────────────────────────────────────
 usage() {
-  printf 'Usage: %s [-n NUM] [-r owner/repo]\n\n' "$(basename "$0")"
+  printf 'Usage: %s [-n NUM] [-r owner/repo] [-t duration]\n\n' "$(basename "$0")"
   printf '  -n NUM   Number of unique runners to spawn (default: 1)\n'
   printf '  -r REPO  Target GitHub repository (e.g., owner/repo). Fallback: GITHUB_REPO env var.\n'
+  printf '  -t TIME  Runner lifetime (e.g., 5m, 12h, 2d). Default: infinite.\n'
   printf '  -h       Show this help message\n\n'
   exit 0
 }
@@ -26,8 +27,9 @@ usage() {
 ## ── argument parsing ─────────────────────────────────────
 NUM_RUNNERS=1
 CLI_TARGET_REPO=""
+RUNNER_TTL=""
 
-while getopts ':n:r:h' opt; do
+while getopts ':n:r:t:h' opt; do
   case "$opt" in
     n)
       [[ "$OPTARG" =~ ^[1-9][0-9]*$ ]] \
@@ -35,6 +37,7 @@ while getopts ':n:r:h' opt; do
       NUM_RUNNERS="$OPTARG"
       ;;
     r) CLI_TARGET_REPO="$OPTARG" ;;
+    t) RUNNER_TTL="$OPTARG" ;;
     h) usage ;;
     :) die "Option -$OPTARG requires an argument" ;;
     \?) die "Unknown option: -$OPTARG" ;;
@@ -56,9 +59,12 @@ TARGET_REPO="${CLI_TARGET_REPO:-${GITHUB_REPO:-}}"
 command -v gh  &>/dev/null || die "'gh' CLI not found — install it and run 'gh auth login'"
 command -v jq  &>/dev/null || die "'jq' not found — install it to parse the token response"
 
+GH_TOKEN=$(gh auth token) || die "Could not fetch GitHub token — run 'gh auth login'"
+
 printf '%b%s%b\n' "$BOLD" "━━━  GitHub Actions Runner Deploy  ━━━" "$RESET"
 info "Runners to spawn: ${NUM_RUNNERS}"
 info "Target repo:      ${TARGET_REPO}"
+[[ -n "$RUNNER_TTL" ]] && info "TTL:              ${RUNNER_TTL}"
 
 ## ── resource allocation (multi-runner only) ──────────────
 RUNNER_CPUS=""
@@ -90,44 +96,9 @@ deploy_runner() {
   if (( NUM_RUNNERS == 1 )); then
     local container_name="gh-runner"
     local runner_name="oracle-instance"
-    local env_key="RUNNER_JIT_CONFIG"
   else
     local container_name="gh-runner-${idx}"
     local runner_name="oracle-instance-${idx}"
-    local env_key="RUNNER_JIT_CONFIG_${idx}"
-  fi
-
-  ## ── 1. fetch runner JIT configuration ──────────────────
-  step "[${idx}/${NUM_RUNNERS}] Fetching runner JIT configuration from GitHub"
-  info "Container: ${container_name}"
-  info "Runner:    ${runner_name}"
-
-  local jit_config
-  jit_config=$(jq -n \
-    --arg name "${runner_name}" \
-    --arg work_folder "_work" \
-    '{name: $name, runner_group_id: 1, labels: ["self-hosted", "linux", "x64"], work_folder: $work_folder}' \
-    | gh api --method POST \
-      -H "Accept: application/vnd.github+json" \
-      /repos/${TARGET_REPO}/actions/runners/generate-jitconfig \
-      --input - \
-    | jq -r '.encoded_jit_config')
-
-  [[ -n "$jit_config" && "$jit_config" != "null" ]] \
-    || die "GitHub API returned no JIT config for runner ${idx} — check 'gh auth status' and repo permissions"
-
-  info "JIT configuration retrieved"
-
-  # Assign to the dynamic key so indirect reference ${!env_key} works later
-  eval "${env_key}=\"${jit_config}\""
-
-  ## update (or append) jit config key in .env
-  if grep -q "^${env_key}=" .env; then
-    sed -i "s|^${env_key}=.*|${env_key}=${jit_config}|" .env
-    ok "${env_key} updated in .env"
-  else
-    printf '\n%s=%s\n' "${env_key}" "${jit_config}" >> .env
-    ok "${env_key} appended to .env"
   fi
 
   ## update RUNNER_URL if present in .env
@@ -180,7 +151,9 @@ deploy_runner() {
     --restart=always
     --env-file        .env
     -e                RUNNER_NAME="${runner_name}"
-    -e                RUNNER_JIT_CONFIG="${!env_key}"
+    -e                GH_TOKEN="${GH_TOKEN}"
+    -e                TARGET_REPO="${TARGET_REPO}"
+    -e                RUNNER_TTL="${RUNNER_TTL}"
     --user            runner
     --read-only
     --tmpfs           /tmp:mode=1777
