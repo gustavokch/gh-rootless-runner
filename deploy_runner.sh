@@ -170,7 +170,7 @@ deploy_runner() {
   info "Runner name: ${runner_name}"
   info "User:        runner (non-root)"
   info "Env file:    .env"
-  info "Read-only:   yes  (tmpfs on /tmp)"
+  info "Read-only:   no   (immutable image + ephemeral container layer; tmpfs /tmp)"
   info "Restart:     always"
 
   # Build args array so resource flags compose cleanly without empty strings.
@@ -185,7 +185,6 @@ deploy_runner() {
     -e                TARGET_REPO="${TARGET_REPO}"
     -e                RUNNER_TTL="${RUNNER_TTL}"
     --user            runner
-    --read-only
     --tmpfs           /tmp:mode=1777
   )
 

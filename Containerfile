@@ -48,6 +48,11 @@ RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main
 
 RUN groupadd --system runner && useradd --system --gid runner --create-home runner
 
+# Passwordless sudo for the runner user (parity with GitHub-hosted runners),
+# so workflow steps can `sudo apt-get install` build deps at runtime.
+RUN echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \
+    && chmod 0440 /etc/sudoers.d/runner
+
 WORKDIR /home/runner
 
 RUN curl -fsSL \
