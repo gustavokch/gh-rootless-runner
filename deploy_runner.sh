@@ -21,6 +21,10 @@ usage() {
   printf '  -r REPO  Target GitHub repository (e.g., owner/repo). Fallback: GITHUB_REPO env var.\n'
   printf '  -t TIME  Runner lifetime (e.g., 5m, 12h, 2d). Default: infinite.\n'
   printf '  -h       Show this help message\n\n'
+  printf 'Name resolution (RUNNER_NAME in .env):\n'
+  printf '  Set          →  single: <name>      multi: <name>-1, <name>-2, …\n'
+  printf '  Unset        →  single: gh-runner   multi: gh-runner-1, gh-runner-2, …\n'
+  printf '  (runner_name mirrors container_name in both cases)\n\n'
   exit 0
 }
 
@@ -46,9 +50,9 @@ done
 shift $((OPTIND - 1))
 
 ## ── preflight ────────────────────────────────────────────
-[[ -f .env ]]        || die ".env file not found — cannot continue"
+[[ -f .env ]] || die ".env file not found — cannot continue"
 
-# Load .env to capture GITHUB_REPO if present
+# Load .env; captures GITHUB_REPO and RUNNER_NAME (if present) into the shell.
 set -a
 source .env
 set +a
@@ -56,15 +60,22 @@ set +a
 TARGET_REPO="${CLI_TARGET_REPO:-${GITHUB_REPO:-}}"
 [[ -z "$TARGET_REPO" ]] && die "Target repository is required. Provide -r <owner/repo> or set GITHUB_REPO in .env"
 
-command -v gh  &>/dev/null || die "'gh' CLI not found — install it and run 'gh auth login'"
-command -v jq  &>/dev/null || die "'jq' not found — install it to parse the token response"
+command -v gh &>/dev/null || die "'gh' CLI not found — install it and run 'gh auth login'"
+command -v jq &>/dev/null || die "'jq' not found — install it to parse the token response"
 
 GH_TOKEN=$(gh auth token) || die "Could not fetch GitHub token — run 'gh auth login'"
+
+# Derive a stable image base name from RUNNER_NAME so every artefact
+# (image tag, default container names) shares the same root and no
+# "gh-runner" literal survives in a nameable deployment.
+IMAGE_BASE="${RUNNER_NAME:-gh-runner}"
+IMAGE_TAG="localhost/${IMAGE_BASE}"
 
 printf '%b%s%b\n' "$BOLD" "━━━  GitHub Actions Runner Deploy  ━━━" "$RESET"
 info "Runners to spawn: ${NUM_RUNNERS}"
 info "Target repo:      ${TARGET_REPO}"
-[[ -n "$RUNNER_TTL" ]] && info "TTL:              ${RUNNER_TTL}"
+[[ -n "${RUNNER_NAME:-}" ]] && info "Runner base name: ${RUNNER_NAME} (from .env)"
+[[ -n "$RUNNER_TTL" ]]     && info "TTL:              ${RUNNER_TTL}"
 
 ## ── resource allocation (multi-runner only) ──────────────
 RUNNER_CPUS=""
@@ -91,17 +102,33 @@ fi
 ## ── per-runner deploy ────────────────────────────────────
 deploy_runner() {
   local idx="$1"
+  local base="${RUNNER_NAME:-}"   # populated from .env via source above
+  local container_name runner_name
 
-  # Use plain names for a single runner; numbered names for multiples
-  if (( NUM_RUNNERS == 1 )); then
-    local container_name="gh-runner"
-    local runner_name="oracle-instance"
+  # Derive names from RUNNER_NAME in .env when set; fall back to hardcoded
+  # defaults otherwise.  In multi-runner mode a numeric suffix is appended.
+  #
+  #   RUNNER_NAME set,   single  →  <name>          / <name>
+  #   RUNNER_NAME set,   multi   →  <name>-<idx>    / <name>-<idx>
+  #   RUNNER_NAME unset, single  →  gh-runner        / gh-vps
+  #   RUNNER_NAME unset, multi   →  gh-runner-<idx>  / gh-vps-<idx>
+  if [[ -n "$base" ]]; then
+    if (( NUM_RUNNERS > 1 )); then
+      container_name="${base}-${idx}"
+      runner_name="${base}-${idx}"
+    else
+      container_name="$base"
+      runner_name="$base"
+    fi
+  elif (( NUM_RUNNERS == 1 )); then
+    container_name="${IMAGE_BASE}"
+    runner_name="gh-vps"
   else
-    local container_name="gh-runner-${idx}"
-    local runner_name="oracle-instance-${idx}"
+    container_name="${IMAGE_BASE}-${idx}"
+    runner_name="gh-vps-${idx}"
   fi
 
-  ## update RUNNER_URL if present in .env
+  ## ── 1. sync RUNNER_URL in .env ─────────────────────────
   if grep -q "^RUNNER_URL=" .env; then
     sed -i "s|^RUNNER_URL=.*|RUNNER_URL=https://github.com/${TARGET_REPO}|" .env
   else
@@ -119,10 +146,10 @@ deploy_runner() {
   ## ── 3. build image (only on first runner) ──────────────
   if (( idx == 1 )); then
     step "[${idx}/${NUM_RUNNERS}] Updating runner version and building image"
-    
+
     local latest_version
     latest_version=$(gh api /repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-    
+
     if [[ -n "$latest_version" && "$latest_version" != "null" ]]; then
       info "Latest runner version: ${latest_version}"
       sed -i "s|^ARG RUNNER_VERSION=.*|ARG RUNNER_VERSION=${latest_version}|" Containerfile
@@ -131,21 +158,24 @@ deploy_runner() {
       warn "Could not fetch latest runner version — using existing version in Containerfile"
     fi
 
-    info "Tag: localhost/gh-runner"
-    podman build -t localhost/gh-runner .
+    info "Tag: ${IMAGE_TAG}"
+    podman build -t "${IMAGE_TAG}" .
     ok   "Image built successfully"
   else
-    info "Reusing already-built image localhost/gh-runner"
+    info "Reusing already-built image ${IMAGE_TAG}"
   fi
 
   ## ── 4. create container ────────────────────────────────
   step "[${idx}/${NUM_RUNNERS}] Creating container '${container_name}'"
-  info "User:      runner (non-root)"
-  info "Env file:  .env"
-  info "Read-only: yes  (tmpfs on /tmp)"
-  info "Restart:   always"
+  info "Runner name: ${runner_name}"
+  info "User:        runner (non-root)"
+  info "Env file:    .env"
+  info "Read-only:   yes  (tmpfs on /tmp)"
+  info "Restart:     always"
 
-  # Build args array so resource flags compose cleanly without empty strings
+  # Build args array so resource flags compose cleanly without empty strings.
+  # -e RUNNER_NAME overrides whatever .env might contain, ensuring the
+  # per-instance name (with numeric suffix when NUM_RUNNERS > 1) wins.
   local -a podman_args=(
     --name            "${container_name}"
     --restart=always
@@ -160,13 +190,13 @@ deploy_runner() {
   )
 
   if (( NUM_RUNNERS > 1 )); then
-    podman_args+=(--cpus    "${RUNNER_CPUS}")
-    podman_args+=(--memory  "${RUNNER_RAM_MB}m")
-    info "CPUs:      ${RUNNER_CPUS}"
-    info "Memory:    ${RUNNER_RAM_MB}MB"
+    podman_args+=(--cpus   "${RUNNER_CPUS}")
+    podman_args+=(--memory "${RUNNER_RAM_MB}m")
+    info "CPUs:        ${RUNNER_CPUS}"
+    info "Memory:      ${RUNNER_RAM_MB}MB"
   fi
 
-  podman container create --replace "${podman_args[@]}" localhost/gh-runner
+  podman container create --replace "${podman_args[@]}" "${IMAGE_TAG}"
   ok "Container created"
 
   ## ── 5. start container ─────────────────────────────────
@@ -182,3 +212,4 @@ done
 
 printf '\n%b%s%b\n\n' "$GREEN$BOLD" \
   "✔  Deploy complete — ${NUM_RUNNERS} runner(s) running" "$RESET"
+
