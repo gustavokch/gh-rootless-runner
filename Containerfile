@@ -1,6 +1,6 @@
 FROM ubuntu:latest
 
-ARG RUNNER_VERSION=2.334.0
+ARG RUNNER_VERSION=2.335.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUSTUP_HOME=/usr/local/rustup
