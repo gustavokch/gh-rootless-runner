@@ -75,7 +75,7 @@ Under the hood the deployment includes improved JIT fetch logic with exponential
 1. **Token Retrieval**: The script uses `gh api` to fetch ephemeral runner registration tokens. The token handling and JIT fetch logic include retries with exponential backoff and clearer logging on failure.
 2. **Container Build & Runner Versioning**: A custom Ubuntu-based image is built containing Node.js, Python, Rust, and other CI tools (defined in `Containerfile`). The script checks the GitHub Actions runner releases and will attempt to update the `ARG RUNNER_VERSION` in `Containerfile` to the latest available release before building. The image is tagged `localhost/<base>` where `<base>` is derived from `RUNNER_NAME` when present, otherwise `gh-runner`.
 3. **Rootless Execution**: `podman` creates the runner instances in rootless mode. Each runner container gets the extra privileges its nested container engine needs, confined to the deploying user's namespace (see [Nested container engine and privileges](#nested-container-engine-and-privileges)).
-4. **Ephemeral Configuration**: When a container starts, `entrypoint.sh` initializes the runner config using `--ephemeral` (one-job lifecycle) if configured, ensuring it only runs one job before unregistering and exiting. The image itself is immutable; the container's rootfs is a throwaway overlay layer (image = lower, container layer = upper) discarded when the container is recreated (`--replace` on deploy, or TTL exit), with `/tmp` on tmpfs. The nested engine's storage volume is the exception (see [Engine storage](#engine-storage)). This lets workflow steps `sudo apt-get install` build deps at runtime while keeping the base image clean. For strict per-job hygiene, recreate the container per job rather than relying on the in-process restart loop.
+4. **Ephemeral Configuration**: When a container starts, `entrypoint.sh` initializes the runner config using `--ephemeral` (one-job lifecycle) if configured, ensuring it only runs one job before unregistering and exiting. The image itself is immutable; the container's rootfs is a throwaway overlay layer (image = lower, container layer = upper) discarded when the container is recreated (`--replace` on deploy, or TTL exit), with `/tmp` on tmpfs. The nested engine's storage volume is the exception (see [Engine storage](#engine-storage)). This lets workflow steps `sudo apt-get install` build deps at runtime while keeping the base image clean. Before every job, `entrypoint.sh` also clears what earlier jobs left behind (see [Between jobs](#between-jobs)).
 
 ## Nested container engine and privileges
 
@@ -95,11 +95,20 @@ These are more privileges than a plain rootless container has: a job can create 
 
 ### Engine storage
 
-The engine keeps its images in a named volume per runner container, `<container>-ci-storage`, mounted at `/var/lib/ci-containers`. Unlike the container layer and `/tmp`, the volume survives redeploys, so pulled images and the build cache are kept. It grows on the host's disk with the images jobs pull and build. When you remove a runner, or redeploy with a smaller `-n` or another `RUNNER_NAME`, remove its volume:
+The engine keeps its images in a named volume per runner container, `<container>-ci-storage`, mounted at `/var/lib/ci-containers`. Unlike the container layer and `/tmp`, the volume survives redeploys, so tagged images, pulled or built, are kept. It grows on the host's disk with the images jobs pull and build. When you remove a runner, or redeploy with a smaller `-n` or another `RUNNER_NAME`, remove its volume:
 
 ```bash
 podman volume rm <container>-ci-storage
 ```
+
+## Between jobs
+
+A runner container runs jobs one after another for as long as it lives. Before every job, `entrypoint.sh` clears what earlier jobs left behind:
+
+- **Engine:** every container, including a cancelled job's service containers and those an interrupted build left behind; unused volumes and networks; untagged images, which are images a build replaced and the cached layers of a multi-stage build's earlier stages. Tagged images stay.
+- **`/tmp`:** emptied, and the tool caches (`HOME`, npm, pip, uv, `XDG_*`) recreated empty. The runner directory stays, and its `_work` keeps the actions, the tool cache and the last workspace. The Rust toolchain, cargo's registry cache and the engine's runtime directory stay too. Registry logins a job made (`docker login`, `podman login`, cargo tokens) go.
+
+Unlike on a GitHub-hosted runner, a job can still see what earlier jobs left in the workspace, the tool cache and the engine's tagged images. For a fresh machine per job, recreate the container per job.
 
 ## Notes & Tips
 
