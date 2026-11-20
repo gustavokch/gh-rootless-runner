@@ -17,17 +17,13 @@ export PIP_CACHE_DIR=/tmp/pip-cache
 export XDG_CACHE_HOME=/tmp/cache
 export XDG_CONFIG_HOME=/tmp/config
 export XDG_DATA_HOME=/tmp/data
+RUNNER_DIR=/tmp/runner
 
-mkdir -p \
-    /tmp/home \
-    /tmp/npm-cache \
-    /tmp/npm-global \
-    /tmp/uv-cache \
-    /tmp/pip-cache \
-    /tmp/cache \
-    /tmp/config \
-    /tmp/data \
-    /tmp/runner
+make_tool_dirs() {
+    mkdir -p "$HOME" "$npm_config_cache" "$npm_config_prefix" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" \
+        "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+}
+make_tool_dirs
 
 # Copy rustup and cargo from image into writable tmpfs so toolchains are available
 cp -r /usr/local/rustup/. /tmp/rustup/
@@ -41,32 +37,42 @@ export PATH=/tmp/cargo/bin:$PATH
 export XDG_RUNTIME_DIR=/tmp/run
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman.sock"
-# Each job starts with an empty engine and an empty /tmp, as on a GitHub-hosted runner (reset_engine and reset_tmp,
-# run before every job). A job cancelled or killed mid-run leaves its service containers and Compose stacks running,
-# and the next job's `services:` container then cannot bind the same port. /tmp is a tmpfs that counts against this
-# container's memory limit, so caches that grow there from job to job end in OOM kills. The engine's storage shares
-# the host's disk, so an image a build replaced (dangling) goes too; the build cache and pulled images stay. sudo: a
-# job's root-owned files, the read-only Go module cache and files the nested containers wrote under subordinate IDs
-# are not the runner user's to remove.
+PODMAN_SERVICE_LOG=/tmp/podman-service.log
+# Before every job, reset_engine and reset_tmp clear what earlier jobs left behind. A job cancelled or killed mid-run
+# leaves its service containers and Compose stacks running, and the next job's `services:` container then cannot
+# bind the same port. /tmp is a tmpfs that counts against this container's memory limit, so caches that grow there
+# from job to job end in OOM kills. The engine's storage shares the host's disk.
+#
+# The engine keeps its tagged images, pulled or built. Untagged ones go: images a build replaced, and the cached
+# layers of a multi-stage build's earlier stages. --external lists the containers `podman rm --all` misses: those a
+# build left behind (Buildah working containers), each of which keeps its image from being pruned. --time 0 kills
+# them at once; waiting for each to stop would hold the next job 10 s per container.
 reset_engine() {
-    podman rm --force --all >/dev/null 2>&1 || true
-    podman volume prune --force >/dev/null 2>&1 || true
-    podman network prune --force >/dev/null 2>&1 || true
-    podman image prune --force >/dev/null 2>&1 || true
+    podman ps --all --external --quiet | xargs --no-run-if-empty podman rm --force --time 0 >/dev/null \
+        || echo "Warning: the nested engine still holds containers from an earlier job"
+    podman volume prune --force >/dev/null || echo "Warning: could not prune the nested engine's volumes"
+    podman network prune --force >/dev/null || echo "Warning: could not prune the nested engine's networks"
+    podman image prune --force >/dev/null || echo "Warning: could not prune the nested engine's untagged images"
 }
+# /tmp keeps the runner, whose _work holds the actions, the tool cache and the last workspace (actions/checkout
+# cleans it); the Rust toolchain and cargo's registry cache; and the engine's runtime directory and log. The logins a
+# job made go: `podman login`'s auth file and cargo's registry tokens. sudo: a job's root-owned files, the read-only Go
+# module cache and files the nested containers wrote under subordinate IDs are not the runner user's to remove.
 reset_tmp() {
     find /tmp -mindepth 1 -maxdepth 1 \
-        ! -name runner ! -name rustup ! -name cargo ! -name run ! -name podman-service.log \
-        -exec sudo -n rm -rf {} + >/dev/null 2>&1 || true
-    mkdir -p "$HOME" "$npm_config_cache" "$npm_config_prefix" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" \
-        "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+        ! -path "$RUNNER_DIR" ! -path "$RUSTUP_HOME" ! -path "$CARGO_HOME" ! -path "$XDG_RUNTIME_DIR" \
+        ! -path "$PODMAN_SERVICE_LOG" -exec sudo -n rm -rf {} + \
+        || echo "Warning: could not empty /tmp"
+    sudo -n rm -f "$XDG_RUNTIME_DIR/containers/auth.json" "$CARGO_HOME/credentials" "$CARGO_HOME/credentials.toml" \
+        || echo "Warning: could not remove the registry logins"
+    make_tool_dirs
 }
-podman system service --time=0 "$DOCKER_HOST" >/tmp/podman-service.log 2>&1 &
+podman system service --time=0 "$DOCKER_HOST" >"$PODMAN_SERVICE_LOG" 2>&1 &
 for _ in $(seq 1 30); do
     docker info >/dev/null 2>&1 && break
     sleep 1
 done
-docker info >/dev/null 2>&1 || { echo "Error: nested Podman engine did not start"; cat /tmp/podman-service.log; exit 1; }
+docker info >/dev/null 2>&1 || { echo "Error: nested Podman engine did not start"; cat "$PODMAN_SERVICE_LOG"; exit 1; }
 echo "Nested Podman engine is ready."
 # Podman runs a container's health check from a systemd timer, and this container has no systemd, so a
 # `--health-cmd` (Actions service containers, Compose `healthcheck`) would stay "starting" forever. Run the checks
@@ -124,8 +130,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cp -r /home/runner/. /tmp/runner/
-cd /tmp/runner
+cp -r /home/runner/. "$RUNNER_DIR"/
+cd "$RUNNER_DIR"
 
 INITIAL_RETRY_DELAY=10
 MAX_RETRY_DELAY=300
