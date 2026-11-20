@@ -36,6 +36,32 @@ cp -r /usr/local/cargo/.  /tmp/cargo/
 # Ensure cargo/rustup bins are on PATH
 export PATH=/tmp/cargo/bin:$PATH
 
+# Nested rootless Podman: a private, Docker-compatible engine inside this container.
+# Workflow services, `docker build` and `docker compose` run here, never on the host.
+export XDG_RUNTIME_DIR=/tmp/run
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman.sock"
+# Drop containers a previous run of this runner left in the engine's storage volume.
+podman rm --force --all >/dev/null 2>&1 || true
+podman network prune --force >/dev/null 2>&1 || true
+podman system service --time=0 "$DOCKER_HOST" >/tmp/podman-service.log 2>&1 &
+for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && break
+    sleep 1
+done
+docker info >/dev/null 2>&1 || { echo "Error: nested Podman engine did not start"; cat /tmp/podman-service.log; exit 1; }
+echo "Nested Podman engine is ready."
+# Podman runs a container's health check from a systemd timer, and this container has no systemd, so a
+# `--health-cmd` (Actions service containers, Compose `healthcheck`) would stay "starting" forever. Run the checks here.
+(
+    while true; do
+        for id in $(podman ps --quiet 2>/dev/null); do
+            podman healthcheck run "$id" >/dev/null 2>&1 || true
+        done
+        sleep 2
+    done
+) &
+
 parse_ttl() {
     local ttl="$1"
     [[ -z "$ttl" ]] && echo "0" && return

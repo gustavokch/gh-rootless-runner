@@ -186,6 +186,15 @@ deploy_runner() {
     -e                RUNNER_TTL="${RUNNER_TTL}"
     --user            runner
     --tmpfs           /tmp:mode=1777
+    # Nested Podman: SYS_ADMIN (scoped to the rootless user namespace, not the host) lets newuidmap build the inner namespace; unmask=ALL makes /proc/sys writable for netavark bridges;
+    # /dev/fuse for fuse-overlayfs; /dev/net/tun for pasta networking; a per-container volume for the private engine's image cache
+    # (two engines must never share one storage directory).
+    --device          /dev/fuse
+    --device          /dev/net/tun
+    --security-opt    label=disable
+    --cap-add         SYS_ADMIN
+    --security-opt    unmask=ALL
+    --volume          "${container_name}-ci-storage:/var/lib/ci-containers"
   )
 
   if (( NUM_RUNNERS > 1 )); then
