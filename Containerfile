@@ -1,6 +1,6 @@
 FROM ubuntu:latest
 
-ARG RUNNER_VERSION=2.338.1
+ARG RUNNER_VERSION=2.335.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUSTUP_HOME=/usr/local/rustup
@@ -36,9 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     ssh-client \
     tar \
-    # CI services: client tools the workflows call directly
-    postgresql-client \
-    ffmpeg \
     # Nested rootless Podman: a private container engine per runner, so jobs never touch the host's containers
     podman \
     fuse-overlayfs \
@@ -61,15 +58,21 @@ RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main
     | sh -s -- -b /usr/local/bin
 
 # `podman compose` uses the docker-compose binary as its provider. Docker CLI and Compose plugin: they talk to the nested Podman's Docker-compatible socket (DOCKER_HOST).
-RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
-    | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
+# Both downloads are pinned by sha256. Compose's pin is the release's published .sha256; Docker publishes none for its static archives, so its pin is the digest of the archive as downloaded.
+RUN curl -fsSL -o /tmp/docker.tgz https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+    && echo '4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640  /tmp/docker.tgz' | sha256sum --check --quiet \
+    && tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
+    && rm /tmp/docker.tgz \
     && mkdir -p /usr/local/lib/docker/cli-plugins \
     && curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
        https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-x86_64 \
+    && echo 'ed1917fb54db184192ea9d0717bcd59e3662ea79db48bff36d3475516c480a6b  /usr/local/lib/docker/cli-plugins/docker-compose' \
+       | sha256sum --check --quiet \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
     && ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
-RUN groupadd --system runner && useradd --system --gid runner --create-home runner
+# A fixed ID: the subordinate ID ranges below skip it.
+RUN groupadd --system --gid 999 runner && useradd --system --uid 999 --gid runner --create-home runner
 
 # Passwordless sudo for the runner user (parity with GitHub-hosted runners),
 # so workflow steps can `sudo apt-get install` build deps at runtime.
@@ -77,7 +80,8 @@ RUN echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \
     && chmod 0440 /etc/sudoers.d/runner
 
 # Subordinate IDs for the nested Podman. The outer container maps IDs 0-65536, so the ranges skip the runner's own ID (999) and stay below 65537; 65534 (nobody) must be mapped for image layers and apt.
-# Engine storage lives on a volume (CI_STORAGE) so image pulls survive container recreation.
+# Engine storage lives in /var/lib/ci-containers, where deploy_runner.sh mounts a volume per runner (<container>-ci-storage), so pulled images survive container recreation.
+# Short image names (`postgres:16`) resolve to Docker Hub, as under Docker; with no search registry, Podman refuses a short name it has no alias for.
 RUN printf 'runner:1:998\nrunner:1000:64537\n' | tee /etc/subuid > /etc/subgid \
     && mkdir -p /var/lib/ci-containers \
     && chown runner:runner /var/lib/ci-containers \

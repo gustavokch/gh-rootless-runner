@@ -69,13 +69,34 @@ done
 docker info >/dev/null 2>&1 || { echo "Error: nested Podman engine did not start"; cat /tmp/podman-service.log; exit 1; }
 echo "Nested Podman engine is ready."
 # Podman runs a container's health check from a systemd timer, and this container has no systemd, so a
-# `--health-cmd` (Actions service containers, Compose `healthcheck`) would stay "starting" forever. Run the checks here.
+# `--health-cmd` (Actions service containers, Compose `healthcheck`) would stay "starting" forever. Run the checks
+# here, each one --health-interval after the last, as Docker does (30 s when unset): run more often, the checks spend
+# a slow service's --health-retries early and mark it unhealthy.
 (
+    declare -A interval=() due=()
     while true; do
-        for id in $(podman ps --quiet 2>/dev/null); do
-            podman healthcheck run "$id" >/dev/null 2>&1 || true
+        now=$(date +%s)
+        declare -A seen=()
+        for id in $(podman ps --quiet --filter health=starting --filter health=healthy --filter health=unhealthy \
+            2>/dev/null); do
+            seen[$id]=1
+            if [[ -z "${interval[$id]:-}" ]]; then
+                secs=$(podman inspect --format '{{.Config.Healthcheck.Interval.Seconds}}' "$id" 2>/dev/null) || continue
+                secs=${secs%.*}
+                [[ "$secs" =~ ^[0-9]+$ ]] && (( secs >= 1 )) || secs=30
+                interval[$id]=$secs
+                due[$id]=$(( now + secs ))
+            fi
+            if (( now >= due[$id] )); then
+                podman healthcheck run "$id" >/dev/null 2>&1 || true
+                due[$id]=$(( $(date +%s) + interval[$id] ))
+            fi
         done
-        sleep 2
+        for id in "${!interval[@]}"; do
+            [[ -n "${seen[$id]:-}" ]] || unset "interval[$id]" "due[$id]"
+        done
+        unset seen
+        sleep 1
     done
 ) &
 

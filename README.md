@@ -4,7 +4,8 @@ Deploy ephemeral, rootless GitHub Actions runners using Podman with automated to
 
 ## Prerequisites
 
-- **[Podman](https://podman.io/)**: For rootless container execution.
+- **[Podman](https://podman.io/)**: For rootless container execution. Run `deploy_runner.sh` as a non-root user: it refuses to run under root (see [Nested container engine and privileges](#nested-container-engine-and-privileges)).
+- **Host**: `/dev/fuse` and `/dev/net/tun`, and a subordinate ID range of at least 65536 IDs for the deploying user in `/etc/subuid` and `/etc/subgid` (the default for new users). The runner image maps container IDs 0-65536.
 - **[GitHub CLI (`gh`)](https://cli.github.com/)**: To fetch runner registration tokens.
   - You must authenticate first: `gh auth login`
 - **[`jq`](https://jqlang.github.io/jq/)**: To parse the token JSON response from the GitHub API.
@@ -73,8 +74,32 @@ Under the hood the deployment includes improved JIT fetch logic with exponential
 
 1. **Token Retrieval**: The script uses `gh api` to fetch ephemeral runner registration tokens. The token handling and JIT fetch logic include retries with exponential backoff and clearer logging on failure.
 2. **Container Build & Runner Versioning**: A custom Ubuntu-based image is built containing Node.js, Python, Rust, and other CI tools (defined in `Containerfile`). The script checks the GitHub Actions runner releases and will attempt to update the `ARG RUNNER_VERSION` in `Containerfile` to the latest available release before building. The image is tagged `localhost/<base>` where `<base>` is derived from `RUNNER_NAME` when present, otherwise `gh-runner`.
-3. **Rootless Execution**: `podman` creates the runner instances in rootless mode with limited privileges.
-4. **Ephemeral Configuration**: When a container starts, `entrypoint.sh` initializes the runner config using `--ephemeral` (one-job lifecycle) if configured, ensuring it only runs one job before unregistering and exiting. The image itself is immutable; the container's rootfs is a throwaway overlay layer (image = lower, container layer = upper) discarded when the container is recreated (`--replace` on deploy, or TTL exit), with `/tmp` on tmpfs. This lets workflow steps `sudo apt-get install` build deps at runtime while keeping the base image clean. For strict per-job hygiene, recreate the container per job rather than relying on the in-process restart loop.
+3. **Rootless Execution**: `podman` creates the runner instances in rootless mode. Each runner container gets the extra privileges its nested container engine needs, confined to the deploying user's namespace (see [Nested container engine and privileges](#nested-container-engine-and-privileges)).
+4. **Ephemeral Configuration**: When a container starts, `entrypoint.sh` initializes the runner config using `--ephemeral` (one-job lifecycle) if configured, ensuring it only runs one job before unregistering and exiting. The image itself is immutable; the container's rootfs is a throwaway overlay layer (image = lower, container layer = upper) discarded when the container is recreated (`--replace` on deploy, or TTL exit), with `/tmp` on tmpfs. The nested engine's storage volume is the exception (see [Engine storage](#engine-storage)). This lets workflow steps `sudo apt-get install` build deps at runtime while keeping the base image clean. For strict per-job hygiene, recreate the container per job rather than relying on the in-process restart loop.
+
+## Nested container engine and privileges
+
+Each runner container runs its own rootless Podman engine, with a Docker-compatible socket (`DOCKER_HOST`) and the Docker CLI and Compose plugin as its clients. Workflow `services:`, `docker build` and `docker compose` run on this engine, so a job's containers and published ports never reach the host's other containers or the other runners.
+
+The engine needs these options on each runner container (`deploy_runner.sh`):
+
+| Option | Why |
+|---|---|
+| `--cap-add SYS_ADMIN` | Lets `newuidmap` build the engine's user namespace. Rootless Podman confines it to the deploying user's namespace; under root it would act on the host, so the script refuses root. |
+| `--security-opt unmask=ALL` | Makes `/proc/sys` writable, which netavark needs to set up bridge networks. |
+| `--security-opt label=disable` | Turns off SELinux separation, which would block the engine's mounts. No effect on hosts without SELinux. |
+| `--device /dev/fuse` | fuse-overlayfs, the engine's storage driver. |
+| `--device /dev/net/tun` | pasta, the engine's rootless networking. |
+
+These are more privileges than a plain rootless container has: a job can create namespaces and mounts inside its runner container. Run only workflows you trust on these runners; for a public repository, do not let pull requests from forks run on them.
+
+### Engine storage
+
+The engine keeps its images in a named volume per runner container, `<container>-ci-storage`, mounted at `/var/lib/ci-containers`. Unlike the container layer and `/tmp`, the volume survives redeploys, so pulled images and the build cache are kept. It grows on the host's disk with the images jobs pull and build. When you remove a runner, or redeploy with a smaller `-n` or another `RUNNER_NAME`, remove its volume:
+
+```bash
+podman volume rm <container>-ci-storage
+```
 
 ## Notes & Tips
 

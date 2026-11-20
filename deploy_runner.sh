@@ -62,6 +62,12 @@ TARGET_REPO="${CLI_TARGET_REPO:-${GITHUB_REPO:-}}"
 
 command -v gh &>/dev/null || die "'gh' CLI not found — install it and run 'gh auth login'"
 command -v jq &>/dev/null || die "'jq' not found — install it to parse the token response"
+command -v podman &>/dev/null || die "'podman' not found — install it to build and run the runners"
+
+# The runner containers get SYS_ADMIN and a writable /proc/sys (see podman_args below). Rootless Podman confines both
+# to the deploying user's namespace; under root they would act on the host.
+[[ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" == true ]] \
+  || die "Run this script as a non-root user: the runner containers get SYS_ADMIN, which only rootless Podman confines"
 
 GH_TOKEN=$(gh auth token) || die "Could not fetch GitHub token — run 'gh auth login'"
 
@@ -171,6 +177,7 @@ deploy_runner() {
   info "User:        runner (non-root)"
   info "Env file:    .env"
   info "Read-only:   no   (immutable image + ephemeral container layer; tmpfs /tmp)"
+  info "Engine:      nested rootless Podman; images on volume ${container_name}-ci-storage (kept across redeploys)"
   info "Restart:     always"
 
   # Build args array so resource flags compose cleanly without empty strings.
@@ -187,6 +194,7 @@ deploy_runner() {
     --user            runner
     --tmpfs           /tmp:mode=1777
     # Nested Podman: SYS_ADMIN (scoped to the rootless user namespace, not the host) lets newuidmap build the inner namespace; unmask=ALL makes /proc/sys writable for netavark bridges;
+    # label=disable turns off SELinux separation, which would block the nested engine's mounts (no effect on hosts without SELinux);
     # /dev/fuse for fuse-overlayfs; /dev/net/tun for pasta networking; a per-container volume for the private engine's image cache
     # (two engines must never share one storage directory).
     --device          /dev/fuse
