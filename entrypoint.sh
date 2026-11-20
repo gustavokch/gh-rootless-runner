@@ -41,9 +41,26 @@ export PATH=/tmp/cargo/bin:$PATH
 export XDG_RUNTIME_DIR=/tmp/run
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/podman.sock"
-# Drop containers a previous run of this runner left in the engine's storage volume.
-podman rm --force --all >/dev/null 2>&1 || true
-podman network prune --force >/dev/null 2>&1 || true
+# Each job starts with an empty engine and an empty /tmp, as on a GitHub-hosted runner (reset_engine and reset_tmp,
+# run before every job). A job cancelled or killed mid-run leaves its service containers and Compose stacks running,
+# and the next job's `services:` container then cannot bind the same port. /tmp is a tmpfs that counts against this
+# container's memory limit, so caches that grow there from job to job end in OOM kills. The engine's storage shares
+# the host's disk, so an image a build replaced (dangling) goes too; the build cache and pulled images stay. sudo: a
+# job's root-owned files, the read-only Go module cache and files the nested containers wrote under subordinate IDs
+# are not the runner user's to remove.
+reset_engine() {
+    podman rm --force --all >/dev/null 2>&1 || true
+    podman volume prune --force >/dev/null 2>&1 || true
+    podman network prune --force >/dev/null 2>&1 || true
+    podman image prune --force >/dev/null 2>&1 || true
+}
+reset_tmp() {
+    find /tmp -mindepth 1 -maxdepth 1 \
+        ! -name runner ! -name rustup ! -name cargo ! -name run ! -name podman-service.log \
+        -exec sudo -n rm -rf {} + >/dev/null 2>&1 || true
+    mkdir -p "$HOME" "$npm_config_cache" "$npm_config_prefix" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" \
+        "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+}
 podman system service --time=0 "$DOCKER_HOST" >/tmp/podman-service.log 2>&1 &
 for _ in $(seq 1 30); do
     docker info >/dev/null 2>&1 && break
@@ -125,6 +142,9 @@ while true; do
     
     # Reset backoff on success
     RETRY_DELAY=$INITIAL_RETRY_DELAY
+
+    reset_engine
+    reset_tmp
 
     echo "Starting runner..."
     ./run.sh --jitconfig "${JIT_CONFIG}" || echo "Runner exited with error"
