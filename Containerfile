@@ -36,6 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     ssh-client \
     tar \
+    # CI services: client tools the workflows call directly
+    postgresql-client \
+    ffmpeg \
     # Nested rootless Podman: a private container engine per runner, so jobs never touch the host's containers
     podman \
     fuse-overlayfs \
